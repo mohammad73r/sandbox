@@ -34,14 +34,14 @@ jobs:
 
       - name: Fast Install Dependencies
         run: |
-          # 1. Install aria2 and ffmpeg (Skipping apt update to save 2+ minutes ;)
+          # Install aria2 and ffmpeg
           sudo apt-get install -y aria2 ffmpeg
           
-          # 2. Download yt-dlp binary directly
+          # Download yt-dlp binary directly
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
           
-          # 3. Install Bun for JS challenges
+          # Install Bun for JS challenges
           curl -fsSL https://bun.com/install | bash
           echo "$HOME/.bun/bin" >> $GITHUB_PATH
 
@@ -104,7 +104,6 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           QUALITY="${{ github.event.inputs.quality }}"
           
-          # Only remove tmp_downloads.
           rm -rf tmp_downloads
           mkdir -p tmp_downloads dl
           
@@ -138,7 +137,7 @@ jobs:
             aria2c --split=2 --max-connection-per-server=2 --dir="tmp_downloads" "$URL"
           fi
 
-      - name: Smart Zip & Split
+      - name: Zip & Split Time
         shell: bash
         run: |
           HAS_PASS="${{ github.event.inputs.password }}"
@@ -149,28 +148,72 @@ jobs:
             LIMIT=$((95 * 1024 * 1024))
             BASENAME=$(basename "$FILE")
             
-            # Remove ONLY identically named zips in case we are re-downloading the same file.
             rm -f "dl/${BASENAME}.zip" "dl/${BASENAME}.z"*
             
-            if [ -n "$HAS_PASS" ] || [ "$SIZE" -gt "$LIMIT" ]; then
+            if [ -n "$HAS_PASS" ] ||[ "$SIZE" -gt "$LIMIT" ]; then
               echo "Zipping/Splitting: $BASENAME"
               
               PASS_ARG=""
               [ -n "$HAS_PASS" ] && PASS_ARG="-P $HAS_PASS"
               
               zip $PASS_ARG -s 95m "dl/${BASENAME}.zip" -j "$FILE"
+              
+              # Record new zip parts for Links.md
+              for ZPART in "dl/${BASENAME}".zip "dl/${BASENAME}".z*; do[ -f "$ZPART" ] && basename "$ZPART" >> new_files.txt
+              done
             else
               echo "File is under 95MB. Copying raw file (No Zip)..."
               cp -f "$FILE" "dl/$BASENAME"
+              echo "$BASENAME" >> new_files.txt
             fi
           done
           rm -rf tmp_downloads
+
+      - name: Update Links.md
+        shell: bash
+        run: |
+          # Skip if no files were processed
+          [ ! -f new_files.txt ] && exit 0
+          
+          REPO="${{ github.repository }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          
+          # Define the static header, exactly 3 lines
+          HEADER="# 🔗 Direct Download Links\n> Click on any link below to start downloading directly.\n\n"
+          
+          # Generate markdown block for the current run
+          echo "### 📅 $(TZ='Asia/Tehran' date +'%Y-%m-%d %H:%M') (IR Time)" > current_run.md
+          
+          while IFS= read -r FNAME; do
+            # URL encode the filename to handle spaces and special chars properly
+            ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote(input()))" <<< "$FNAME")
+            RAW_URL="https://github.com/$REPO/raw/$BRANCH/dl/$ENCODED_NAME"
+            echo "- 📥 **[$FNAME]($RAW_URL)**" >> current_run.md
+          done < new_files.txt
+          
+          echo "" >> current_run.md
+          
+          # Safely prepend new links below the header
+          if [ -f Links.md ]; then
+            # Extract everything AFTER the 3-line header
+            tail -n +4 Links.md > old_links.md 2>/dev/null || touch old_links.md
+            # Rebuild the file: Header -> New Links -> Old Links
+            echo -e "$HEADER" > Links.md
+            cat current_run.md old_links.md >> Links.md
+            rm old_links.md
+          else
+            # Create fresh file
+            echo -e "$HEADER" > Links.md
+            cat current_run.md >> Links.md
+          fi
+          
+          rm -f new_files.txt current_run.md
 
       - name: Push to Repository
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           git config user.name "NET-Sentinel Bot"
           git config user.email "224584266+NetSentinel-Bot@users.noreply.github.com"
-          git add dl/
-          git commit -m "✨ Add downloaded file via Panel [skip ci]" || echo "Nothing to commit"
+          git add dl/ Links.md
+          git commit -m "✨ Add downloaded file via Panel[skip ci]" || echo "Nothing to commit"
           git push origin HEAD:$BRANCH
